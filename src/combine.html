@@ -12,12 +12,19 @@
         <div>
             <h2>WebSocket</h2>
             <button id="ws-start" style="display: none">Start test</button>
-            <p id="ws-stats"></p>
+            <p id="ws-stats">&nbsp;</p>
+            <p>&nbsp;</p>
+            <p>Explanation: </p>
+            <p>client -> durable object -> echoes back -> measure</p>
         </div>
         <div>
             <h2>DataChannel</h2>
             <button id="dc-start" style="display: none">Start test</button>
-            <p id="dc-stats"></p>
+            <p id="dc-stats">&nbsp;</p>
+            <p id="dc-p2p-stats">&nbsp;</p>
+            <p>Explanation: </p>
+            <p>first stat: left session -> calls -> right session -> measure</p>
+            <p>second stat: left session -> calls -> right session -> calls -> sends back to left session -> measure</p>
         </div>
     </div>
     <script type="module">
@@ -33,8 +40,9 @@
         const dcStartButton = document.getElementById("dc-start")
         const wsStats = document.getElementById("ws-stats")
         const dcStats = document.getElementById("dc-stats")
+        const dcP2PStats = document.getElementById("dc-p2p-stats")
 
-        const wsSamples = [], dcSamples = [];
+        const wsSamples = [], dcSamples = [], dcP2PSamples = [];
 
         fetch('https://1.1.1.1/cdn-cgi/trace')
         .then((res) => res.text())
@@ -70,6 +78,28 @@
                 id: leftChannelResp.dataChannels[0].id,
             }
         );
+        const rightChannelResp = await fetch(
+            `${API_BASE}/sessions/${rightSession.sessionId}/datachannels/new`,
+            {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                    dataChannels: [
+                        {
+                            location: "local",
+                            dataChannelName: "channel-right",
+                        },
+                    ],
+                }),
+            }
+        ).then((res) => res.json());
+        const rightChannel = rightSession.peerConnection.createDataChannel(
+            "channel-right",
+            {
+                negotiated: true,
+                id: rightChannelResp.dataChannels[0].id,
+            }
+        );
 
         const leftChannelSubscribeResp = await fetch(
             `${API_BASE}/sessions/${rightSession.sessionId}/datachannels/new`,
@@ -95,6 +125,30 @@
                     id: leftChannelSubscribeResp.dataChannels[0].id,
                 }
             );
+        const rightChannelSubscribeResp = await fetch(
+            `${API_BASE}/sessions/${leftSession.sessionId}/datachannels/new`,
+            {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                    dataChannels: [
+                        {
+                            location: "remote",
+                            sessionId: rightSession.sessionId,
+                            dataChannelName: "channel-right",
+                        },
+                    ],
+                }),
+            }
+        ).then((res) => res.json());
+        const rightChannelSubscribed =
+            leftSession.peerConnection.createDataChannel(
+                "channel-right-subscribed",
+                {
+                    negotiated: true,
+                    id: rightChannelSubscribeResp.dataChannels[0].id,
+                }
+            );
 
         wsStartButton.style.display = "block"
         dcStartButton.style.display = "block"
@@ -111,8 +165,16 @@
             const received = evt.data
             const receivedTs = performance.now()
             const sendTs = parseFloat(received)
+            rightChannel.send(received)
             dcSamples.push(receivedTs - sendTs)
             updateStats(dcSamples, dcStats)
+        })
+        rightChannelSubscribed.addEventListener('message', (evt) => {
+            const received = evt.data
+            const receivedTs = performance.now()
+            const sendTs = parseFloat(received)
+            dcP2PSamples.push(receivedTs - sendTs)
+            updateStats(dcP2PSamples, dcP2PStats)
         })
 
         function runWs() {
