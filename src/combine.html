@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+</head>
+
+<body>
+    <div class="grid">
+        <h1>Echo Performance Test</h1>
+        <div>
+            <h2>WebSocket</h2>
+            <button id="ws-start" style="display: none">Start test</button>
+            <p id="ws-stats"></p>
+        </div>
+        <div>
+            <h2>DataChannel</h2>
+            <button id="dc-start" style="display: none">Start test</button>
+            <p id="dc-stats"></p>
+        </div>
+    </div>
+    <script type="module">
+        const APP_ID = "APP_ID_PLACEHOLDER";
+        const APP_TOKEN = "APP_TOKEN_PLACEHOLDER";
+        const headers = {
+            Authorization: `Bearer ${APP_TOKEN}`,
+        };
+        const API_BASE = `https://rtc.live.cloudflare.com/v1/apps/${APP_ID}`;
+
+        const echoMagic = crypto.randomUUID()
+        const wsStartButton = document.getElementById("ws-start")
+        const dcStartButton = document.getElementById("dc-start")
+        const wsStats = document.getElementById("ws-stats")
+        const dcStats = document.getElementById("dc-stats")
+
+        const wsSamples = [], dcSamples = [];
+
+        const socket = new WebSocket(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws?name=${echoMagic}`)
+
+        socket.addEventListener("open", (evt) => {
+            wsStartButton.style.display = "block"
+        });
+
+        const leftSession = await createCallsSession()
+        const rightSession = await createCallsSession()
+
+        const leftChannelResp = await fetch(
+            `${API_BASE}/sessions/${leftSession.sessionId}/datachannels/new`,
+            {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                    dataChannels: [
+                        {
+                            location: "local",
+                            dataChannelName: "channel-left",
+                        },
+                    ],
+                }),
+            }
+        ).then((res) => res.json());
+        const leftChannel = leftSession.peerConnection.createDataChannel(
+            "channel-left",
+            {
+                negotiated: true,
+                id: leftChannelResp.dataChannels[0].id,
+            }
+        );
+
+        const leftChannelSubscribeResp = await fetch(
+            `${API_BASE}/sessions/${rightSession.sessionId}/datachannels/new`,
+            {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                    dataChannels: [
+                        {
+                            location: "remote",
+                            sessionId: leftSession.sessionId,
+                            dataChannelName: "channel-left",
+                        },
+                    ],
+                }),
+            }
+        ).then((res) => res.json());
+        const leftChannelSubscribed =
+            rightSession.peerConnection.createDataChannel(
+                "channel-left-subscribed",
+                {
+                    negotiated: true,
+                    id: leftChannelSubscribeResp.dataChannels[0].id,
+                }
+            );
+
+        dcStartButton.style.display = "block"
+
+        socket.addEventListener('message', (evt) => {
+            const received = evt.data
+            const receivedTs = performance.now()
+            const sendTs = parseFloat(received)
+            wsSamples.push(receivedTs - sendTs)
+            updateStats(wsSamples, wsStats)
+        })
+
+        leftChannelSubscribed.addEventListener('message', (evt) => {
+            const received = evt.data
+            const receivedTs = performance.now()
+            const sendTs = parseFloat(received)
+            dcSamples.push(receivedTs - sendTs)
+            updateStats(dcSamples, dcStats)
+        })
+
+        function runWs() {
+            return setInterval(() => {
+                socket.send(performance.now())
+            }, 500)
+        }
+
+        function runDc() {
+            return setInterval(() => {
+                leftChannel.send(performance.now())
+            }, 500)
+        }
+
+        function stdev(arr) {
+            let mean = arr.reduce((acc, curr) => {
+                return acc + curr
+            }, 0) / arr.length;
+            arr = arr.map((k) => {
+                return (k - mean) ** 2
+            });
+            let sum = arr.reduce((acc, curr) => acc + curr, 0);
+            let variance = sum / arr.length
+            return Math.sqrt(sum / arr.length)
+        }
+
+        function updateStats(samples, elem) {
+            const min = Math.min.apply(null, samples)
+            const max = Math.max.apply(null, samples)
+            const avg = samples.reduce((a, b) => a + b) / samples.length
+            const std = stdev(samples)
+            elem.textContent = `Samples: ${samples.length}; Min: ${min.toFixed(2)}; Max: ${max.toFixed(2)}; Stdev: ${std.toFixed(2)}; Average: ${avg.toFixed(2)}`
+        }
+
+        let wsInterval;
+        wsStartButton.addEventListener('click', () => {
+            if (wsStartButton.textContent.startsWith('Start')) {
+                wsSamples.length = 0
+                wsInterval = runWs()
+                wsStartButton.textContent = wsStartButton.textContent.replace('Start', 'Stop')
+            } else {
+                clearInterval(wsInterval)
+                wsStartButton.textContent = wsStartButton.textContent.replace('Stop', 'Start')
+            }
+        })
+
+        let dcInterval
+        dcStartButton.addEventListener('click', () => {
+            if (dcStartButton.textContent.startsWith('Start')) {
+                dcSamples.length = 0;
+                dcInterval = runDc()
+                dcStartButton.textContent = dcStartButton.textContent.replace('Start', 'Stop')
+            } else {
+                clearInterval(dcInterval)
+                dcStartButton.textContent = dcStartButton.textContent.replace('Stop', 'Start')
+            }
+        })
+
+        async function createCallsSession() {
+            const peerConnection = new RTCPeerConnection({
+                iceServers: [
+                    {
+                        urls: "stun:stun.cloudflare.com:3478",
+                    },
+                ],
+                bundlePolicy: "max-bundle",
+            });
+
+            // in order for the ICE connection to be established, there must
+            // be at least one track present, but since we want each peer
+            // connection and session to have tracks explicitly pushed and
+            // pulled, we can add an empty audio track here to force the
+            // connection to be established.
+            peerConnection.addTransceiver("audio", {
+                direction: "inactive",
+            });
+
+            const dc = peerConnection.createDataChannel("server-events");
+
+            // create an offer and set it as the local description
+            await peerConnection.setLocalDescription(
+                await peerConnection.createOffer()
+            );
+            const { sessionId, sessionDescription } = await fetch(
+                `${API_BASE}/sessions/new`,
+                {
+                    method: "POST",
+                    headers,
+                    body: JSON.stringify({
+                        sessionDescription: peerConnection.localDescription,
+                    }),
+                }
+            ).then((res) => res.json());
+            const connected = new Promise((res, rej) => {
+                // timeout after 5s
+                setTimeout(rej, 5000);
+                const iceConnectionStateChangeHandler = () => {
+                    if (peerConnection.iceConnectionState === "connected") {
+                        peerConnection.removeEventListener(
+                            "iceconnectionstatechange",
+                            iceConnectionStateChangeHandler
+                        );
+                        res(undefined);
+                    }
+                };
+                peerConnection.addEventListener(
+                    "iceconnectionstatechange",
+                    iceConnectionStateChangeHandler
+                );
+            });
+
+            // Once both local and remote descriptions are set, the ICE process begins
+            await peerConnection.setRemoteDescription(sessionDescription);
+            // Wait until the peer connection's iceConnectionState is "connected"
+            await connected;
+            return {
+                peerConnection,
+                sessionId,
+                dc,
+            };
+        }
+    </script>
+    <style>
+        /* Styles are safe to ignore, just here for demo */
+
+        html {
+            color-scheme: light dark;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+                Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue",
+                sans-serif;
+            background: white;
+            color: black;
+        }
+
+        body,
+        h1,
+        h2 {
+            margin: 0;
+        }
+
+        h1,
+        h2 {
+            font-weight: 400;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            grid-column: 1 / -1;
+        }
+
+        h2 {
+            font-size: 1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        video {
+            width: 100%;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 1rem;
+        }
+
+        @media (max-width: 500px) {
+            .grid {
+                grid-template-columns: minmax(0, 1fr);
+            }
+        }
+    </style>
+</body>
+
+</html>

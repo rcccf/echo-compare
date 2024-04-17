@@ -8,8 +8,9 @@
  * Learn more at https://developers.cloudflare.com/durable-objects
  */
 
-import dataChannelPage from './datachannel.html'
-import websocketPage from './websocket.html'
+import dataChannelPage from './datachannel.html';
+import websocketPage from './websocket.html';
+import combinePage from './combine.html';
 
 /**
  * Associate bindings declared in wrangler.toml with the TypeScript type system
@@ -29,6 +30,8 @@ export interface Env {
 	//
 	// Example binding to a Queue. Learn more at https://developers.cloudflare.com/queues/javascript-apis/
 	// MY_QUEUE: Queue;
+	APP_ID: string;
+	APP_TOKEN: string;
 }
 
 /** A Durable Object's behavior is defined in an exported Javascript class */
@@ -70,18 +73,18 @@ export class MyDurableObject {
 
 		const id = crypto.randomUUID();
 
-		this.sessions[id] = server
+		this.sessions[id] = server;
 
 		server.addEventListener('message', (event: MessageEvent) => {
 			for (const id in this.sessions) {
-				this.sessions[id].send(event.data)
+				this.sessions[id].send(event.data);
 			}
-		})
+		});
 
 		server.addEventListener('close', (cls: CloseEvent) => {
-			delete this.sessions[id]
-			server.close(cls.code)
-		})
+			delete this.sessions[id];
+			server.close(cls.code);
+		});
 
 		return new Response(null, {
 			status: 101,
@@ -100,7 +103,7 @@ export default {
 	 * @returns The response to be sent back to the client
 	 */
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-		const { searchParams, pathname } = new URL(request.url)
+		const { searchParams, pathname } = new URL(request.url);
 
 		if (pathname.endsWith('/ws')) {
 			// Expect to receive a WebSocket Upgrade request.
@@ -112,7 +115,7 @@ export default {
 
 			// This example will refer to the same Durable Object instance,
 			// since the name "foo" is hardcoded.
-			let name = searchParams.get('name') || 'foo'
+			let name = searchParams.get('name') || 'foo';
 			let id = env.MY_DURABLE_OBJECT.idFromName(name);
 			let stub = env.MY_DURABLE_OBJECT.get(id);
 
@@ -120,11 +123,19 @@ export default {
 		}
 
 		if (pathname.endsWith('/datachannel')) {
-			return new Response(dataChannelPage, {headers: {"Content-Type": "text/html;charset=UTF-8"}});
+			return new Response(dataChannelPage.replace('APP_ID_PLACEHOLDER', env.APP_ID).replace('APP_TOKEN_PLACEHOLDER', env.APP_TOKEN), {
+				headers: { 'Content-Type': 'text/html;charset=UTF-8' },
+			});
 		}
-		
+
 		if (pathname.endsWith('/websocket')) {
-			return new Response(websocketPage, {headers: {"Content-Type": "text/html;charset=UTF-8"}});
+			return new Response(websocketPage, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
+		}
+
+		if (pathname.endsWith('/combine')) {
+			return new Response(combinePage.replace('APP_ID_PLACEHOLDER', env.APP_ID).replace('APP_TOKEN_PLACEHOLDER', env.APP_TOKEN), {
+				headers: { 'Content-Type': 'text/html;charset=UTF-8' },
+			});
 		}
 
 		return new Response(null, {
