@@ -18,9 +18,7 @@
     <script type="module">
         const echoMagic = crypto.randomUUID()
 
-        const objectName = 'bleh'
-
-        const socket = new WebSocket(`wss://${window.location.host}/ws?name=${objectName}`)
+        const socket = new WebSocket(`wss://${window.location.host}/ws?name=${echoMagic}`)
 
         const localBox = document.getElementById("local-box");
         const echoButton = document.getElementById("local-echo-test")
