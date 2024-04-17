@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+</head>
+
+<body>
+  <div class="grid">
+    <h1>DataChannel Echo Demo</h1>
+    <div>
+      <h2>Local stream</h2>
+      <video id="local" style="max-width: 240px; display: block; padding-bottom: 1em;" autoplay muted
+        playsinline></video>
+      <input type="text" placeholder="send message on local channel" style="display: none" id="local-box" />
+      <button type="button" style="display: none" id="local-echo-test">Test echo performance</button>
+      <div id="remote-messages"></div>
+    </div>
+    <div>
+      <h2>Remote echo stream</h2>
+      <video id="remote" style="max-width: 240px; display: block; padding-bottom: 1em;" autoplay muted
+        playsinline></video>
+      <input type="text" placeholder="send message on remote channel" style="display: none" id="remote-box" />
+      <button type="button" style="display: none" id="remote-echo-test">Test echo performance</button>
+      <div id="local-messages"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    // This is the App ID from the dashboard that identifies this Calls Application.
+    // Note: Calls sessions are limited to interacting with sessions in the same App ID.
+    const APP_ID = "2a6efa9b8ce8d60e1ad0d350308441f5";
+    // ❗❗❗ DO NOT USE YOUR TOKEN IN THE BROWSER FOR PRODUCTION. It should be kept and used server-side.
+    const APP_TOKEN =
+      "341cb56a3f6f82be138afd41b4be005c5334b2ddfabbaaad48a7345669d7d9c8";
+    // We'll use this for authentication when making requests to the Calls API.
+    const headers = {
+      Authorization: `Bearer ${APP_TOKEN}`,
+    };
+    const API_BASE = `https://rtc.live.cloudflare.com/v1/apps/${APP_ID}`;
+    const localVideo = document.querySelector("video#local");
+    const remoteVideo = document.querySelector("video#remote");
+    if (
+      !(localVideo instanceof HTMLVideoElement) ||
+      !(remoteVideo instanceof HTMLVideoElement)
+    )
+      throw new Error("These should be video elements");
+
+    const echoMagic = crypto.randomUUID()
+
+    // get a MediaStream from the user's webcam & mic
+    const media = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: true,
+    });
+    // show the local feed
+    localVideo.srcObject = media;
+
+    // First, we'll establish the "local" Calls session by calling createCallsSession
+    // which is defined towards the bottom of this script. This will create an
+    // RTCPeerConnection and a Calls session, and connect the two.
+    const localSession = await createCallsSession();
+
+    // Next we need to push our audio and video tracks. We will add them to the peer
+    // connection using the addTransceiver API which allows us to specify the direction
+    const transceivers = media.getTracks().map((track) =>
+      localSession.peerConnection.addTransceiver(track, {
+        direction: "sendonly",
+      })
+    );
+
+    // Now that the peer connection has tracks, the next step is to create and set a
+    // new offer as the local description. This offer will contain the new tracks in
+    // its session description.
+    await localSession.peerConnection.setLocalDescription(
+      await localSession.peerConnection.createOffer()
+    );
+
+    // Send the local session description to the Calls API, it will
+    // respond with an answer and trackIds.
+    const pushTracksResponse = await fetch(
+      `${API_BASE}/sessions/${localSession.sessionId}/tracks/new`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          sessionDescription: {
+            sdp: localSession.peerConnection.localDescription?.sdp,
+            type: "offer",
+          },
+          tracks: transceivers.map(({ mid, sender }) => ({
+            location: "local",
+            mid,
+            trackName: sender.track?.id,
+          })),
+        }),
+      }
+    ).then((res) => res.json());
+
+    // We take the answer we got from the Calls API and set it as the
+    // peer connection's remote description.
+    await localSession.peerConnection.setRemoteDescription(
+      new RTCSessionDescription(pushTracksResponse.sessionDescription)
+    );
+
+    // 🌀🌀🌀
+    // At this point, we're done with the sending "local" side, and
+    // can now pretend that we're in a completely different browser
+    // tab to receive on the "remote" side, and have received the
+    // session id and track information to pull via some signalling
+    // method such as WebSockets.
+    const localSessionId = localSession.sessionId;
+    const tracksToPull = transceivers.map(({ sender }) => ({
+      location: "remote",
+      trackName: sender.track?.id,
+      sessionId: localSessionId,
+    }));
+
+    // Let's create the remoteSession now to pull the tracks
+    const remoteSession = await createCallsSession();
+
+    // We're going to modify the remote session and pull these tracks
+    // by requesting an offer from the Calls API with the tracks we
+    // want to pull.
+    const pullResponse = await fetch(
+      `${API_BASE}/sessions/${remoteSession.sessionId}/tracks/new`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          tracks: tracksToPull,
+        }),
+      }
+    ).then((res) => res.json());
+
+    // We set up this promise before updating local and remote descriptions
+    // so the "track" event listeners are already in place before they fire.
+    const resolvingTracks = Promise.all(
+      pullResponse.tracks.map(
+        ({ mid }) =>
+          // This will resolve when the track for the corresponding mid is added.
+          new Promise((res, rej) => {
+            setTimeout(rej, 5000);
+            const handleTrack = ({ transceiver, track }) => {
+              if (transceiver.mid !== mid) return;
+              remoteSession.peerConnection.removeEventListener(
+                "track",
+                handleTrack
+              );
+              res(track);
+            };
+            remoteSession.peerConnection.addEventListener(
+              "track",
+              handleTrack
+            );
+          })
+      )
+    );
+
+    // Handle renegotiation, this will always be true when pulling tracks
+    if (pullResponse.requiresImmediateRenegotiation) {
+      // We got a session description from the remote in the response,
+      // we need to set it as the remote description
+      remoteSession.peerConnection.setRemoteDescription(
+        pullResponse.sessionDescription
+      );
+      // Create and set the answer as local description
+      await remoteSession.peerConnection.setLocalDescription(
+        await remoteSession.peerConnection.createAnswer()
+      );
+      // Send our answer back to the Calls API
+      const renegotiateResponse = await fetch(
+        `${API_BASE}/sessions/${remoteSession.sessionId}/renegotiate`,
+        {
+          method: "PUT",
+          headers,
+          body: JSON.stringify({
+            sessionDescription: {
+              sdp: remoteSession.peerConnection.currentLocalDescription?.sdp,
+              type: "answer",
+            },
+          }),
+        }
+      ).then((res) => res.json());
+      if (renegotiateResponse.errorCode) {
+        throw new Error(renegotiateResponse.errorDescription);
+      }
+    }
+
+    // Now we wait for the tracks to resolve
+    const pulledTracks = await resolvingTracks;
+
+    // Lastly, we set them in the remoteVideo to display
+    const remoteVideoStream = new MediaStream();
+    remoteVideo.srcObject = remoteVideoStream;
+    pulledTracks.forEach((t) => remoteVideoStream.addTrack(t));
+
+    // We can create a DataChannel to broadcast messages/data to subscribed peers.
+    // This will create a receiver DataChannel for the "Local" session
+    const localChannelResp = await fetch(
+      `${API_BASE}/sessions/${localSession.sessionId}/datachannels/new`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          dataChannels: [
+            {
+              location: "local",
+              dataChannelName: "channel-local",
+            },
+          ],
+        }),
+      }
+    ).then((res) => res.json());
+    const localChannel = localSession.peerConnection.createDataChannel(
+      "channel-local",
+      {
+        negotiated: true,
+        id: localChannelResp.dataChannels[0].id,
+      }
+    );
+
+    // Similarly, we can create a receiver DataChannel for the "Remote" session
+    const remoteChannelResp = await fetch(
+      `${API_BASE}/sessions/${remoteSession.sessionId}/datachannels/new`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          dataChannels: [
+            {
+              location: "local",
+              dataChannelName: "channel-remote",
+            },
+          ],
+        }),
+      }
+    ).then((res) => res.json());
+    const remoteChannel = remoteSession.peerConnection.createDataChannel(
+      "channel-remote",
+      {
+        negotiated: true,
+        id: remoteChannelResp.dataChannels[0].id,
+      }
+    );
+
+    // Now the "Local" one can subscribe the DataChannel from the "Remote" session
+    const subscribeRemoteChannelResp = await fetch(
+      `${API_BASE}/sessions/${localSession.sessionId}/datachannels/new`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          dataChannels: [
+            {
+              location: "remote",
+              sessionId: remoteSession.sessionId,
+              dataChannelName: "channel-remote",
+            },
+          ],
+        }),
+      }
+    ).then((res) => res.json());
+    const remoteChannelSubscribed =
+      localSession.peerConnection.createDataChannel(
+        "channel-remote-subscribed",
+        {
+          negotiated: true,
+          id: subscribeRemoteChannelResp.dataChannels[0].id,
+        }
+      );
+    remoteChannelSubscribed.addEventListener("message", (evt) => {
+      const received = evt.data
+      const receivedTs = performance.now()
+      if (received.startsWith(echoMagic)) {
+        const parts = received.split(':')
+        const sendTs = parseFloat(parts[1])
+        const box = document.getElementById("local-messages");
+        const el = document.createElement("p")
+        const sm = document.createElement("small")
+        sm.textContent = `echo elapsed: ${(receivedTs - sendTs).toFixed(2)}ms`
+        el.appendChild(sm)
+        box.appendChild(el)
+      } else {
+        const box = document.getElementById("remote-messages");
+        const el = document.createElement("p");
+        el.textContent = `Remote: ${evt.data}`;
+        box.appendChild(el);
+      }
+    });
+    showLocalBox();
+
+    // Let's do the same thing for the "Remote" session
+    const subscribeLocalChannelResp = await fetch(
+      `${API_BASE}/sessions/${remoteSession.sessionId}/datachannels/new`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          dataChannels: [
+            {
+              location: "remote",
+              sessionId: localSession.sessionId,
+              dataChannelName: "channel-local",
+            },
+          ],
+        }),
+      }
+    ).then((res) => res.json());
+    const localChannelSubscribed =
+      remoteSession.peerConnection.createDataChannel(
+        "channel-local-subscribed",
+        {
+          negotiated: true,
+          id: subscribeLocalChannelResp.dataChannels[0].id,
+        }
+      );
+    localChannelSubscribed.addEventListener("message", (evt) => {
+      const received = evt.data
+      const receivedTs = performance.now()
+      if (received.startsWith(echoMagic)) {
+        const parts = received.split(':')
+        const sendTs = parseFloat(parts[1])
+        const box = document.getElementById("remote-messages");
+        const el = document.createElement("p")
+        const sm = document.createElement("small")
+        sm.textContent = `echo elapsed: ${(receivedTs - sendTs).toFixed(2)}ms`
+        el.appendChild(sm)
+        box.appendChild(el)
+      } else {
+        const box = document.getElementById("local-messages");
+        const el = document.createElement("p");
+        el.textContent = `Local: ${received}`;
+        box.appendChild(el);
+      }
+    });
+    showRemoteBox();
+
+    // ===============================================================
+    // THE END — below is the createCallsSession function used above.
+    // ===============================================================
+
+    /**
+     * Creates a peer connection and connects it to a new Calls session
+     */
+    async function createCallsSession() {
+      const peerConnection = new RTCPeerConnection({
+        iceServers: [
+          {
+            urls: "stun:stun.cloudflare.com:3478",
+          },
+        ],
+        bundlePolicy: "max-bundle",
+      });
+
+      // in order for the ICE connection to be established, there must
+      // be at least one track present, but since we want each peer
+      // connection and session to have tracks explicitly pushed and
+      // pulled, we can add an empty audio track here to force the
+      // connection to be established.
+      peerConnection.addTransceiver("audio", {
+        direction: "inactive",
+      });
+
+      const dc = peerConnection.createDataChannel("server-events");
+
+      // create an offer and set it as the local description
+      await peerConnection.setLocalDescription(
+        await peerConnection.createOffer()
+      );
+      const { sessionId, sessionDescription } = await fetch(
+        `${API_BASE}/sessions/new`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            sessionDescription: peerConnection.localDescription,
+          }),
+        }
+      ).then((res) => res.json());
+      const connected = new Promise((res, rej) => {
+        // timeout after 5s
+        setTimeout(rej, 5000);
+        const iceConnectionStateChangeHandler = () => {
+          if (peerConnection.iceConnectionState === "connected") {
+            peerConnection.removeEventListener(
+              "iceconnectionstatechange",
+              iceConnectionStateChangeHandler
+            );
+            res(undefined);
+          }
+        };
+        peerConnection.addEventListener(
+          "iceconnectionstatechange",
+          iceConnectionStateChangeHandler
+        );
+      });
+
+      // Once both local and remote descriptions are set, the ICE process begins
+      await peerConnection.setRemoteDescription(sessionDescription);
+      // Wait until the peer connection's iceConnectionState is "connected"
+      await connected;
+      return {
+        peerConnection,
+        sessionId,
+        dc,
+      };
+    }
+
+    function showLocalBox() {
+      const localBox = document.getElementById("local-box");
+      localBox.style.display = "inline";
+      const echoButton = document.getElementById("local-echo-test")
+      echoButton.style.display = "inline"
+      localBox.addEventListener("keydown", (evt) => {
+        if (evt.key !== "Enter") {
+          return;
+        }
+        const msg = evt.target.value;
+        evt.target.value = "";
+        localChannel.send(msg);
+      });
+      echoButton.addEventListener('click', (evt) => {
+        const now = performance.now()
+        const msg = `${echoMagic}:${now}`
+        localChannel.send(msg)
+      })
+    }
+
+    function showRemoteBox() {
+      const remoteBox = document.getElementById("remote-box");
+      remoteBox.style.display = "inline";
+      const echoButton = document.getElementById("remote-echo-test")
+      echoButton.style.display = "inline"
+      remoteBox.addEventListener("keydown", (evt) => {
+        if (evt.key !== "Enter") {
+          return;
+        }
+        const msg = evt.target.value;
+        evt.target.value = "";
+        remoteChannel.send(msg);
+      });
+      echoButton.addEventListener('click', (evt) => {
+        const now = performance.now()
+        const msg = `${echoMagic}:${now}`
+        remoteChannel.send(msg)
+      })
+    }
+  </script>
+  <style>
+    /* Styles are safe to ignore, just here for demo */
+
+    html {
+      color-scheme: light dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue",
+        sans-serif;
+      background: white;
+      color: black;
+    }
+
+    body,
+    h1,
+    h2 {
+      margin: 0;
+    }
+
+    h1,
+    h2 {
+      font-weight: 400;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      grid-column: 1 / -1;
+    }
+
+    h2 {
+      font-size: 1rem;
+      margin-bottom: 0.5rem;
+    }
+
+    video {
+      width: 100%;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 1rem;
+    }
+
+    @media (max-width: 500px) {
+      .grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+  </style>
+</body>
+
+</html>

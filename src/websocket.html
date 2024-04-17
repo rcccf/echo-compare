@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+</head>
+
+<body>
+    <div class="grid">
+        <h1>WebSocket Echo Demo</h1>
+        <div>
+            <input type="text" placeholder="broadcast message" style="display: none" id="local-box" />
+            <button type="button" style="display: none" id="local-echo-test">Test echo performance</button>
+            <div id="remote-messages"></div>
+        </div>
+    </div>
+    <script type="module">
+        const echoMagic = crypto.randomUUID()
+
+        const objectName = 'bleh'
+
+        const socket = new WebSocket(`wss://${window.location.host}/ws?name=${objectName}`)
+
+        const localBox = document.getElementById("local-box");
+        const echoButton = document.getElementById("local-echo-test")
+
+        socket.addEventListener("open", (evt) => {
+            localBox.style.display = "inline";
+            echoButton.style.display = "inline"
+        });
+
+        echoButton.addEventListener('click', (evt) => {
+            const sendTs = performance.now()
+            socket.send(`${echoMagic}:${sendTs}`)
+        })
+
+        localBox.addEventListener("keydown", (evt) => {
+            if (evt.key !== "Enter") {
+                return;
+            }
+            const msg = evt.target.value;
+            evt.target.value = "";
+            socket.send(msg);
+        });
+
+        socket.addEventListener('message', (evt) => {
+            const received = evt.data
+            const receivedTs = performance.now()
+            if (received.startsWith(echoMagic)) {
+                const parts = received.split(':')
+                const sendTs = parseFloat(parts[1])
+                const box = document.getElementById("remote-messages");
+                const el = document.createElement("p")
+                const sm = document.createElement("small")
+                sm.textContent = `echo elapsed: ${(receivedTs - sendTs).toFixed(2)}ms`
+                el.appendChild(sm)
+                box.appendChild(el)
+            } else {
+                const box = document.getElementById("remote-messages");
+                const el = document.createElement("p");
+                el.textContent = `Server: ${evt.data}`;
+                box.appendChild(el);
+            }
+        })
+    </script>
+    <style>
+        /* Styles are safe to ignore, just here for demo */
+
+        html {
+            color-scheme: light dark;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+                Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue",
+                sans-serif;
+            background: white;
+            color: black;
+        }
+
+        body,
+        h1,
+        h2 {
+            margin: 0;
+        }
+
+        h1,
+        h2 {
+            font-weight: 400;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            grid-column: 1 / -1;
+        }
+
+        h2 {
+            font-size: 1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        video {
+            width: 100%;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 1rem;
+        }
+
+        @media (max-width: 500px) {
+            .grid {
+                grid-template-columns: minmax(0, 1fr);
+            }
+        }
+    </style>
+</body>
+
+</html>

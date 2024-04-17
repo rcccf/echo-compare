@@ -8,6 +8,9 @@
  * Learn more at https://developers.cloudflare.com/durable-objects
  */
 
+import dataChannelPage from './datachannel.html'
+import websocketPage from './websocket.html'
+
 /**
  * Associate bindings declared in wrangler.toml with the TypeScript type system
  */
@@ -30,6 +33,10 @@ export interface Env {
 
 /** A Durable Object's behavior is defined in an exported Javascript class */
 export class MyDurableObject {
+	private state: DurableObjectState;
+	private storage: DurableObjectStorage;
+	private env: Env;
+	private sessions: Record<string, WebSocket> = {};
 	/**
 	 * The constructor is invoked once upon creation of the Durable Object, i.e. the first call to
 	 * 	`DurableObjectStub::get` for a given identifier
@@ -37,7 +44,16 @@ export class MyDurableObject {
 	 * @param state - The interface for interacting with Durable Object state
 	 * @param env - The interface to reference bindings declared in wrangler.toml
 	 */
-	constructor(state: DurableObjectState, env: Env) {}
+	constructor(state: DurableObjectState, env: Env) {
+		this.state = state;
+
+		// `state.storage` provides access to our durable storage. It provides a simple KV
+		// get()/put() interface.
+		this.storage = state.storage;
+
+		// `env` is our environment bindings (discussed earlier).
+		this.env = env;
+	}
 
 	/**
 	 * The Durable Object fetch handler will be invoked when a Durable Object instance receives a
@@ -47,7 +63,30 @@ export class MyDurableObject {
 	 * @returns The response to be sent back to the Worker
 	 */
 	async fetch(request: Request): Promise<Response> {
-		return new Response('Hello World');
+		const webSocketPair = new WebSocketPair();
+		const [client, server] = Object.values(webSocketPair);
+
+		server.accept();
+
+		const id = crypto.randomUUID();
+
+		this.sessions[id] = server
+
+		server.addEventListener('message', (event: MessageEvent) => {
+			for (const id in this.sessions) {
+				this.sessions[id].send(event.data)
+			}
+		})
+
+		server.addEventListener('close', (cls: CloseEvent) => {
+			delete this.sessions[id]
+			server.close(cls.code)
+		})
+
+		return new Response(null, {
+			status: 101,
+			webSocket: client,
+		});
 	}
 }
 
@@ -61,18 +100,39 @@ export default {
 	 * @returns The response to be sent back to the client
 	 */
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-		// We will create a `DurableObjectId` using the pathname from the Worker request
-		// This id refers to a unique instance of our 'MyDurableObject' class above
-		let id: DurableObjectId = env.MY_DURABLE_OBJECT.idFromName(new URL(request.url).pathname);
+		const { searchParams, pathname } = new URL(request.url)
 
-		// This stub creates a communication channel with the Durable Object instance
-		// The Durable Object constructor will be invoked upon the first call for a given id
-		let stub: DurableObjectStub = env.MY_DURABLE_OBJECT.get(id);
+		if (pathname.endsWith('/ws')) {
+			// Expect to receive a WebSocket Upgrade request.
+			// If there is one, accept the request and return a WebSocket Response.
+			const upgradeHeader = request.headers.get('Upgrade');
+			if (!upgradeHeader || upgradeHeader !== 'websocket') {
+				return new Response('Durable Object expected Upgrade: websocket', { status: 426 });
+			}
 
-		// We call `fetch()` on the stub to send a request to the Durable Object instance
-		// The Durable Object instance will invoke its fetch handler to handle the request
-		let response = await stub.fetch(request);
+			// This example will refer to the same Durable Object instance,
+			// since the name "foo" is hardcoded.
+			let name = searchParams.get('name') || 'foo'
+			let id = env.MY_DURABLE_OBJECT.idFromName(name);
+			let stub = env.MY_DURABLE_OBJECT.get(id);
 
-		return response;
+			return stub.fetch(request);
+		}
+
+		if (pathname.endsWith('/datachannel')) {
+			return new Response(dataChannelPage, {headers: {"Content-Type": "text/html;charset=UTF-8"}});
+		}
+		
+		if (pathname.endsWith('/websocket')) {
+			return new Response(websocketPage, {headers: {"Content-Type": "text/html;charset=UTF-8"}});
+		}
+
+		return new Response(null, {
+			status: 400,
+			statusText: 'Bad Request',
+			headers: {
+				'Content-Type': 'text/plain',
+			},
+		});
 	},
 };
