@@ -44,7 +44,7 @@
 
         const wsSamples = [], dcSamples = [], dcP2PSamples = [];
 
-        fetch('https://1.1.1.1/cdn-cgi/trace')
+        fetch('/cdn-cgi/trace')
         .then((res) => res.text())
         .then((trace) => {
             const parsed = parseINIString(trace)
@@ -231,6 +231,17 @@
                 clearInterval(dcInterval)
                 dcStartButton.textContent = dcStartButton.textContent.replace('Stop', 'Start')
             }
+        })
+
+        socket.addEventListener('error', () => {
+            clearInterval(wsInterval)
+            wsStartButton.textContent = wsStartButton.textContent.replace('Stop', 'Start')
+            wsStats.textContent = 'websocket error, please reload page'
+        })
+        socket.addEventListener('close', () => {
+            clearInterval(wsInterval)
+            wsStartButton.textContent = wsStartButton.textContent.replace('Stop', 'Start')
+            wsStats.textContent = 'websocket closed, please reload page'
         })
 
         function parseINIString(data) {
