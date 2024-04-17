@@ -38,10 +38,6 @@
 
         const socket = new WebSocket(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws?name=${echoMagic}`)
 
-        socket.addEventListener("open", (evt) => {
-            wsStartButton.style.display = "block"
-        });
-
         const leftSession = await createCallsSession()
         const rightSession = await createCallsSession()
 
@@ -93,6 +89,7 @@
                 }
             );
 
+        wsStartButton.style.display = "block"
         dcStartButton.style.display = "block"
 
         socket.addEventListener('message', (evt) => {
