@@ -15,7 +15,7 @@
             <p id="ws-stats">&nbsp;</p>
             <p>&nbsp;</p>
             <p>Explanation: </p>
-            <p>client -> durable object -> echoes back -> measure</p>
+            <p>socket A -> durable object -> socket B-> measure</p>
         </div>
         <div>
             <h2>DataChannel</h2>
@@ -23,8 +23,8 @@
             <p id="dc-stats">&nbsp;</p>
             <p id="dc-p2p-stats">&nbsp;</p>
             <p>Explanation: </p>
-            <p>first stat: left session -> calls -> right session -> measure</p>
-            <p>second stat: left session -> calls -> right session -> calls -> sends back to left session -> measure</p>
+            <p>first stat: session A -> calls -> session B -> measure</p>
+            <p>second stat: session A -> calls -> session B -> calls -> sends back to session A -> measure</p>
         </div>
     </div>
     <script type="module">
@@ -52,7 +52,8 @@
             el.textContent += ` (${parsed.colo}/${parsed.fl}/${parsed.sliver})`
         })
 
-        const socket = new WebSocket(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws?name=${echoMagic}`)
+        const leftSocket = new WebSocket(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws?name=${echoMagic}`)
+        const rightSocket = new WebSocket(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws?name=${echoMagic}`)
         const leftSession = await createCallsSession()
         const rightSession = await createCallsSession()
 
@@ -153,7 +154,7 @@
         wsStartButton.style.display = "block"
         dcStartButton.style.display = "block"
 
-        socket.addEventListener('message', (evt) => {
+        rightSocket.addEventListener('message', (evt) => {
             const received = evt.data
             const receivedTs = performance.now()
             const sendTs = parseFloat(received)
@@ -179,7 +180,7 @@
 
         function runWs() {
             return setInterval(() => {
-                socket.send(performance.now())
+                leftSocket.send(performance.now())
             }, 500)
         }
 
@@ -233,12 +234,12 @@
             }
         })
 
-        socket.addEventListener('error', () => {
+        leftSocket.addEventListener('error', () => {
             clearInterval(wsInterval)
             wsStartButton.textContent = wsStartButton.textContent.replace('Stop', 'Start')
             wsStats.textContent = 'websocket error, please reload page'
         })
-        socket.addEventListener('close', () => {
+        leftSocket.addEventListener('close', () => {
             clearInterval(wsInterval)
             wsStartButton.textContent = wsStartButton.textContent.replace('Stop', 'Start')
             wsStats.textContent = 'websocket closed, please reload page'
